@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <netinet/in.h>
 #include <string.h>
-#include <time.h>
+#include <sys/time.h>
 #include <string>
 #include <vector>
 #include <queue>
@@ -25,6 +25,9 @@ int activeUsaps = 0;
 void sigint(int snum);
 void sigusr1(int snum);
 
+/**
+ * Refills th USAP pool when the number of available forks falls below the minimum pool size
+ */
 void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &zygoteSocketPIDs, queue<int> &availableIndices, queue<int> &unavailableIndices)
 {
     while (numUsaps < usapPoolSizeMax)
@@ -46,32 +49,63 @@ void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &zygoteSocketPI
 
 int main(int argc, char const *argv[])
 {
-    void childTerminated(int);
-    signal(SIGCHLD, childTerminated);
-
     int opt = 1;
 
+    /**
+     * Maximum Pool Size
+     */
     int usapPoolSizeMax = 10;
+
+    /**
+     * Minimum Pool Size before it is refilled
+     */
     int usapPoolSizeMin = 5;
+
+    /**
+     * PIDs of the forked processes
+     */
     vector<int> zygoteSocketPIDs;
+
+    /**
+     * Number of USAPs currently in existence
+     */
     int numUsaps = 0;
+
+    /** 
+     * Indices of available USAPs in the vector zygoteSocketPIDs
+     */
     queue<int> availableIndices;
+
+    /** 
+     * Indices of unavailable USAPs in the vector zygoteSocketPIDs
+     */
     queue<int> unavailableIndices;
 
+    /**
+     * PID of the parent process
+     */
     parentPID = getpid();
 
-    // Registering sighandlers
-    signal(SIGINT, sigint);   // parent gives a green signal to child
-    signal(SIGUSR1, sigusr1); // child sends message to parent that a connection request has been received
+    /**
+     * Registers sighandlers
+     */
+    void childTerminated(int);
+    signal(SIGCHLD, childTerminated); // Triggered on the termination of a child process
+    signal(SIGINT, sigint);           // Parent gives a green signal to child
+    signal(SIGUSR1, sigusr1);         // Child sends message to parent that a connection request has been received
 
-    // Creating socket file descriptor
+    /**
+     *  Createssocket file descriptor
+     */
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0)
     {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    // Forcefully attaching socket to the port 8080
+    /**
+     *  Forcefully attaches socket to the port 8080
+     */
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
                    &opt, sizeof(opt)))
     {
@@ -83,7 +117,9 @@ int main(int argc, char const *argv[])
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-    // Forcefully attaching socket to the port 8080
+    /**
+     *  Forcefully attaching socket to the port 8080
+     */
     if (bind(server_fd, (struct sockaddr *)&address,
              sizeof(address)) < 0)
     {
@@ -97,10 +133,16 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
+    /**
+     * PID of the last forked process
+     */
     int lastForkPID = -1;
 
     printf("Server LOG %d: Forking...\n", parentPID);
 
+    /**
+     * Forks new processes until maximum pool size is reached
+     */
     while (numUsaps < usapPoolSizeMax)
     {
         lastForkPID = fork();
@@ -114,16 +156,30 @@ int main(int argc, char const *argv[])
         }
     }
 
+    struct timeval startTime, stopTime;
+    gettimeofday(&startTime, NULL);
+    int requestsHandled = 0;
+
+    /**
+     * Parent process allocates incoming requests to the children and 
+     * maintains the number of children between minimum and maximum pool size
+     */
     if (getpid() == parentPID)
     {
         while (true)
         {
+            /**
+             * Ensure that the number of active processes is not more than the maximum pool size
+             */
             while (activeUsaps >= usapPoolSizeMax)
             {
                 usleep(1e4);
                 continue;
             }
 
+            /**
+             * Decides which child to assign the next request to
+             */
             int indexAcquired = availableIndices.front();
             availableIndices.pop();
             unavailableIndices.push(indexAcquired);
@@ -131,21 +187,42 @@ int main(int argc, char const *argv[])
 
             printf("Server LOG %d: Assigning next request to PID: %d\n", parentPID, zygoteSocketPIDs[indexAcquired]);
 
+            /**
+             * Send SIGINT to the child who is about to handle the next incoming request
+             */
             kill(zygoteSocketPIDs[indexAcquired], SIGINT);
 
             activeUsaps += 1;
 
+            /**
+             * Refill the pool if numUsaps falls below the minimum pool size
+             */
             if (numUsaps <= usapPoolSizeMin)
             {
                 refillUsaps(numUsaps, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
-                if (getpid() != parentPID)
+                if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
                     break;
             }
 
-            pause(); // Receives SIGUSR1, saying that child has received a connection request. Can proceed with assigning next request to a new PID
+            /**
+             * Receives SIGUSR1, saying that child has received a connection request
+             * Proceeds with assigning next request to a new PID on receiving SIGUSR1
+             */
+            pause();
+
+            requestsHandled += 1;
+            if (requestsHandled % 25 == 0)
+            {
+                gettimeofday(&stopTime, NULL);
+                double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
+                printf("Server LOG %d: %d requests handled in %f seconds\n", parentPID, requestsHandled, seconds);
+            }
         }
     }
 
+    /**
+     * Child process accepts socket connection and handles the request on receiving SIGINT from the parent
+     */
     if (getpid() != parentPID)
     {
         // std::cout << "Child process: " << getpid() << std::endl;
@@ -169,8 +246,9 @@ void sigint(int snum)
     int valread;
     char buffer[1024] = {0};
 
-    // printf("SIGINT Received %d\n", getpid());
-
+    /**
+     * Accepts incoming connection
+     */
     if ((client = accept(server_fd, (struct sockaddr *)&address,
                          (socklen_t *)&addrlen)) < 0)
     {
@@ -180,6 +258,10 @@ void sigint(int snum)
     }
     printf("Server LOG %d: Connection accepted!\n", childPID);
 
+    /** 
+     * Signals the parent that a connection request has been received, 
+     * so that a new child can be assigned for the next incoming request
+     */
     kill(parentPID, SIGUSR1);
 
     valread = read(client, buffer, 1024);
@@ -197,11 +279,10 @@ void sigusr1(int snum)
     return;
 }
 
+/**
+ * Executed when a child has been terminated
+ */
 void childTerminated(int snum)
 {
-    int pid;
-    int status;
-
-    pid = wait(&status);
     activeUsaps -= 1;
 }
