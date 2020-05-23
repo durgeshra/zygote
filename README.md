@@ -1,4 +1,8 @@
-Implement the following:
+Samsung Electronics Internship 2020: Durgesh Agrawal
+
+Task 1 Description:
+
+Implement the following:-
 
 - 1 zygote process 
 which is reqired to create 1 process to zygoteserver via socket connection 
@@ -21,3 +25,9 @@ before leaving, refill the process pool if the number of pre-forked processes be
 - the usap processes
 it's forked and wait socket cmd from zygoteserver,
 if it receives a command, it just prints one log and exits.
+
+How to use:
+
+Run `./start.sh` in one terminal.
+
+Run `./zygoteClient.sh` in another terminal.
