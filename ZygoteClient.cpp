@@ -5,13 +5,14 @@
 #include <string.h>
 #include <time.h>
 #include <string>
+
 #define PORT 8080
 
 using namespace std;
 
 int main(int argc, char const *argv[])
 {
-    int sock = 0, valread;
+    int zygoteClientSocket = 0, valread;
     struct sockaddr_in serv_addr;
 
         serv_addr.sin_family = AF_INET;
@@ -24,7 +25,7 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    int reqPerSec = 1;
+    int reqPerSec = 25;
     float sleepInterval = 1.0 / reqPerSec;
     time_t startTime = time(NULL);
 
@@ -33,13 +34,13 @@ int main(int argc, char const *argv[])
     while (true)
     {
 
-        if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        if ((zygoteClientSocket = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         {
             printf("\n Socket creation error \n");
             return -1;
         }
 
-        if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        if (connect(zygoteClientSocket, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
         {
             printf("\nConnection Failed \n");
             return -1;
@@ -54,12 +55,12 @@ int main(int argc, char const *argv[])
         char buffer[1024] = {0};
         requestNum += 1;
 
-        send(sock, toSend, strlen(toSend), 0);
+        send(zygoteClientSocket, toSend, strlen(toSend), 0);
         printf("Client LOG: Data sent from client.\n");
-        valread = read(sock, buffer, 1024);
+        valread = read(zygoteClientSocket, buffer, 1024);
         printf("Client LOG: %s\n", buffer);
 
-        close(sock);
+        close(zygoteClientSocket);
         usleep(sleepInterval * 1e6);
     }
 

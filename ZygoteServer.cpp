@@ -25,7 +25,7 @@ int activeUsaps = 0;
 void sigint(int snum);
 void sigusr1(int snum);
 
-void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &socketPIDs, queue<int> &availableIndices, queue<int> &unavailableIndices)
+void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &zygoteSocketPIDs, queue<int> &availableIndices, queue<int> &unavailableIndices)
 {
     while (numUsaps < usapPoolSizeMax)
     {
@@ -36,7 +36,7 @@ void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &socketPIDs, qu
         {
             int unavailableIndex = unavailableIndices.front();
             unavailableIndices.pop();
-            socketPIDs[unavailableIndex] = pid;
+            zygoteSocketPIDs[unavailableIndex] = pid;
             numUsaps += 1;
             availableIndices.push(unavailableIndex);
         }
@@ -53,14 +53,12 @@ int main(int argc, char const *argv[])
 
     int usapPoolSizeMax = 10;
     int usapPoolSizeMin = 5;
-    vector<int> socketPIDs;
+    vector<int> zygoteSocketPIDs;
     int numUsaps = 0;
     queue<int> availableIndices;
     queue<int> unavailableIndices;
 
     parentPID = getpid();
-
-    printf("Parent PID: %d\n", parentPID);
 
     // Registering sighandlers
     signal(SIGINT, sigint);   // parent gives a green signal to child
@@ -101,7 +99,7 @@ int main(int argc, char const *argv[])
 
     int lastForkPID = -1;
 
-    printf("Forking...\n");
+    printf("Server LOG %d: Forking...\n", parentPID);
 
     while (numUsaps < usapPoolSizeMax)
     {
@@ -110,7 +108,7 @@ int main(int argc, char const *argv[])
             break; // Child
         else
         {
-            socketPIDs.push_back(lastForkPID);
+            zygoteSocketPIDs.push_back(lastForkPID);
             availableIndices.push(numUsaps);
             numUsaps += 1;
         }
@@ -131,15 +129,15 @@ int main(int argc, char const *argv[])
             unavailableIndices.push(indexAcquired);
             numUsaps -= 1;
 
-            printf("Server LOG %d: Assigning next request to PID: %d\n", parentPID, socketPIDs[indexAcquired]);
+            printf("Server LOG %d: Assigning next request to PID: %d\n", parentPID, zygoteSocketPIDs[indexAcquired]);
 
-            kill(socketPIDs[indexAcquired], SIGINT);
+            kill(zygoteSocketPIDs[indexAcquired], SIGINT);
 
             activeUsaps += 1;
 
             if (numUsaps <= usapPoolSizeMin)
             {
-                refillUsaps(numUsaps, usapPoolSizeMax, socketPIDs, availableIndices, unavailableIndices);
+                refillUsaps(numUsaps, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
                 if (getpid() != parentPID)
                     break;
             }
