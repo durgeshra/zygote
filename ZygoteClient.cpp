@@ -14,6 +14,16 @@ int main(int argc, char const *argv[])
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
 
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(PORT);
+
+    // Convert IPv4 and IPv6 addresses from text to binary form
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
+    {
+        printf("\nInvalid address/ Address not supported \n");
+        return -1;
+    }
+
     int reqPerSec = 1;
     float sleepInterval = 1.0 / reqPerSec;
     time_t startTime = time(NULL);
@@ -29,22 +39,12 @@ int main(int argc, char const *argv[])
             return -1;
         }
 
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(PORT);
-
-        // Convert IPv4 and IPv6 addresses from text to binary form
-        if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
-        {
-            printf("\nInvalid address/ Address not supported \n");
-            return -1;
-        }
-
         if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
         {
             printf("\nConnection Failed \n");
             return -1;
         }
-        printf("Success\n");
+        
         string data = "Command from client: ";
         data.append(to_string(requestNum));
 

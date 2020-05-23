@@ -7,13 +7,12 @@
 #include <time.h>
 #include <string>
 #include <vector>
+#include <queue>
 #include <iostream>
 #include <signal.h>
 #include <sys/wait.h>
 
 #define PORT 8080
-
-// USE SIGNALS!!!!!!!!!!!!!!!!!!!!
 
 using namespace std;
 
@@ -26,9 +25,8 @@ int activeUsaps = 0;
 void sigint(int snum);
 void sigusr1(int snum);
 
-void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &socketPIDs, vector<int> &availableIndices, vector<int> &unavailableIndices)
+void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &socketPIDs, queue<int> &availableIndices, queue<int> &unavailableIndices)
 {
-    // printf("FFFFFFF %d\n", getpid());
     while (numUsaps < usapPoolSizeMax)
     {
         int pid = fork();
@@ -36,11 +34,11 @@ void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &socketPIDs, ve
             return;
         else
         {
-            int unavailableIndex = unavailableIndices.back();
-            unavailableIndices.pop_back();
+            int unavailableIndex = unavailableIndices.front();
+            unavailableIndices.pop();
             socketPIDs[unavailableIndex] = pid;
             numUsaps += 1;
-            availableIndices.push_back(unavailableIndex);
+            availableIndices.push(unavailableIndex);
         }
     }
     return;
@@ -53,12 +51,12 @@ int main(int argc, char const *argv[])
 
     int opt = 1;
 
-    int usapPoolSizeMax = 1;
-    int usapPoolSizeMin = 1;
+    int usapPoolSizeMax = 10;
+    int usapPoolSizeMin = 5;
     vector<int> socketPIDs;
     int numUsaps = 0;
-    vector<int> availableIndices;
-    vector<int> unavailableIndices;
+    queue<int> availableIndices;
+    queue<int> unavailableIndices;
 
     parentPID = getpid();
 
@@ -101,21 +99,19 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
-    int pid = -1;
+    int lastForkPID = -1;
 
-    // Forking...
     printf("Forking...\n");
 
     while (numUsaps < usapPoolSizeMax)
     {
-        pid = fork();
-        if (pid == 0)
+        lastForkPID = fork();
+        if (lastForkPID == 0)
             break; // Child
         else
         {
-            // std::cout << "OOLALA" << pid << std::endl;
-            socketPIDs.push_back(pid);
-            availableIndices.push_back(numUsaps);
+            socketPIDs.push_back(lastForkPID);
+            availableIndices.push(numUsaps);
             numUsaps += 1;
         }
     }
@@ -124,51 +120,37 @@ int main(int argc, char const *argv[])
     {
         while (true)
         {
-            // // Refill if no USAP available
-            // if (availableIndices.size() == 0)
-            // {
-            //     refillUsaps(numUsaps, usapPoolSizeMax, socketPIDs, availableIndices, unavailableIndices);
-            // }
-
             while (activeUsaps >= usapPoolSizeMax)
             {
                 usleep(1e4);
                 continue;
             }
 
-            int indexAcquired = availableIndices.back();
-            availableIndices.pop_back();
-            unavailableIndices.push_back(indexAcquired);
+            int indexAcquired = availableIndices.front();
+            availableIndices.pop();
+            unavailableIndices.push(indexAcquired);
             numUsaps -= 1;
 
-            printf("Assigning next request to PID: %d\n", socketPIDs[indexAcquired]);
+            printf("Server LOG %d: Assigning next request to PID: %d\n", parentPID, socketPIDs[indexAcquired]);
 
             kill(socketPIDs[indexAcquired], SIGINT);
 
             activeUsaps += 1;
-            // printf("ACTIVE USAPS: %d\n", activeUsaps);
 
-            if (numUsaps < usapPoolSizeMin)
+            if (numUsaps <= usapPoolSizeMin)
             {
                 refillUsaps(numUsaps, usapPoolSizeMax, socketPIDs, availableIndices, unavailableIndices);
                 if (getpid() != parentPID)
                     break;
             }
-            // printf("AAA %d %d\n", numUsaps, getpid());
 
-            // pause(); // Receives SIGUSR1, saying that child has received a connection request. Can proceed with assigning next request to a new PID
-
-            // // Don't create any more process until actveUsaps is maxed out
-            // while (activeUsaps >=     usapPoolSizeMax)
-            // {
-            //     usleep(1e4);
-            //     continue;
-            // }
+            pause(); // Receives SIGUSR1, saying that child has received a connection request. Can proceed with assigning next request to a new PID
         }
     }
+
     if (getpid() != parentPID)
     {
-        std::cout << "Child process: " << getpid() << std::endl;
+        // std::cout << "Child process: " << getpid() << std::endl;
         pause();
     }
 
@@ -177,13 +159,19 @@ int main(int argc, char const *argv[])
 
 void sigint(int snum)
 {
-
     signal(SIGINT, sigint);
+    int childPID = getpid();
+
     int client;
-    char *data = "Response from server";
+    string data = "Response from server: Sent from PID ";
+    data.append(to_string(childPID));
+    char toSend[data.length() + 1];
+    strcpy(toSend, data.c_str());
+
     int valread;
     char buffer[1024] = {0};
-    printf("SIGINT Received %d\n", getpid());
+
+    // printf("SIGINT Received %d\n", getpid());
 
     if ((client = accept(server_fd, (struct sockaddr *)&address,
                          (socklen_t *)&addrlen)) < 0)
@@ -192,14 +180,16 @@ void sigint(int snum)
         perror("accept");
         exit(EXIT_FAILURE);
     }
-    printf("Connection accepted!\n");
+    printf("Server LOG %d: Connection accepted!\n", childPID);
+
     kill(parentPID, SIGUSR1);
 
     valread = read(client, buffer, 1024);
-    printf("Server LOG %d: Data read from client.\n", getpid());
-    printf("Server LOG %d: %s\n", getpid(), buffer);
-    send(client, data, strlen(data), 0);
-    printf("Response sent from server\n");
+    printf("Server LOG %d: Data read from client.\n", childPID);
+    printf("Server LOG %d: %s\n", childPID, buffer);
+
+    send(client, toSend, strlen(toSend), 0);
+
     close(client);
     exit(0);
 }
@@ -216,5 +206,4 @@ void childTerminated(int snum)
 
     pid = wait(&status);
     activeUsaps -= 1;
-    // printf("");
 }
