@@ -11,6 +11,7 @@
 #include <iostream>
 #include <signal.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #define PORT 8080
 
@@ -22,8 +23,76 @@ int server_fd;
 int parentPID;
 int activeUsaps = 0;
 
+/**
+ * Parent-Child sockets for sending client information to child
+ */
+vector<pair<int, int>> parentChildSock;
+
+/** 
+ * Indices of available USAPs in the vector zygoteSocketPIDs
+ */
+queue<int> availableIndices;
+
+/** 
+ * Indices of unavailable USAPs in the vector zygoteSocketPIDs
+ */
+queue<int> unavailableIndices;
+
 void sigint(int snum);
 void sigusr1(int snum);
+
+static void wyslij(int socket, int fd) // send fd by socket
+{
+    struct msghdr msg = {0};
+    char m_buffer[256];
+    char buf[CMSG_SPACE(sizeof(fd))];
+    memset(buf, '\0', sizeof(buf));
+    struct iovec io = {.iov_base = m_buffer, .iov_len = 3};
+
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+
+    *((int *)CMSG_DATA(cmsg)) = fd;
+
+    msg.msg_controllen = CMSG_SPACE(sizeof(fd));
+
+    if (sendmsg(socket, &msg, 0) < 0)
+        printf("Failed to send message\n");
+}
+
+static int odbierz(int socket) // receive fd from socket
+{
+    struct msghdr msg = {0};
+
+    char m_buffer[256];
+    struct iovec io = {.iov_base = m_buffer, .iov_len = sizeof(m_buffer)};
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+
+    char c_buffer[256];
+    msg.msg_control = c_buffer;
+    msg.msg_controllen = sizeof(c_buffer);
+
+    if (recvmsg(socket, &msg, 0) < 0)
+        printf("Failed to receive message\n");
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+
+    unsigned char *data = CMSG_DATA(cmsg);
+
+    printf("About to extract fd\n");
+    int fd = *((int *)data);
+    printf("Extracted fd %d\n", fd);
+
+    return fd;
+}
 
 /**
  * Refills th USAP pool when the number of available forks falls below the minimum pool size
@@ -64,22 +133,12 @@ int main(int argc, char const *argv[])
     /**
      * PIDs of the forked processes
      */
-    vector<int> zygoteSocketPIDs;
+    vector<int> zygoteSocketPIDs(usapPoolSizeMax, -1);
 
     /**
      * Number of USAPs currently in existence
      */
     int numUsaps = 0;
-
-    /** 
-     * Indices of available USAPs in the vector zygoteSocketPIDs
-     */
-    queue<int> availableIndices;
-
-    /** 
-     * Indices of unavailable USAPs in the vector zygoteSocketPIDs
-     */
-    queue<int> unavailableIndices;
 
     /**
      * PID of the parent process
@@ -141,6 +200,29 @@ int main(int argc, char const *argv[])
     printf("Server LOG %d: Forking...\n", parentPID);
 
     /**
+     * Fill parentChildSock completely before forking child processes
+     */
+    for (int i = 0; i < usapPoolSizeMax; i++)
+    {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0)
+        {
+            printf("Error creating unix-domain socket pair\n.");
+        }
+        pair<int, int> newSock(sv[0], sv[1]);
+        parentChildSock.push_back(newSock);
+    }
+
+    /**
+     * Fill up unavailableIndices before forking. Useful to identify receiving end of socket in the child,
+     * and maintaining uniformity ith refillUsaps function
+     */
+    for (int i = 0; i < usapPoolSizeMax; i++)
+    {
+        unavailableIndices.push(i);
+    }
+
+    /**
      * Forks new processes until maximum pool size is reached
      */
     while (numUsaps < usapPoolSizeMax)
@@ -150,7 +232,9 @@ int main(int argc, char const *argv[])
             break; // Child
         else
         {
-            zygoteSocketPIDs.push_back(lastForkPID);
+            int unavailableIndex = unavailableIndices.front();
+            unavailableIndices.pop();
+            zygoteSocketPIDs[unavailableIndex] = lastForkPID;
             availableIndices.push(numUsaps);
             numUsaps += 1;
         }
@@ -181,12 +265,30 @@ int main(int argc, char const *argv[])
              * Decides which child to assign the next request to
              */
             int indexAcquired = availableIndices.front();
+            int sendFDSock = parentChildSock[indexAcquired].first;
             availableIndices.pop();
             unavailableIndices.push(indexAcquired);
             numUsaps -= 1;
 
-            printf("Server LOG %d: Assigning next request to PID: %d\n", parentPID, zygoteSocketPIDs[indexAcquired]);
+            printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[indexAcquired], indexAcquired);
 
+            int client;
+
+            /**
+             * Accepts incoming connection
+             */
+            if ((client = accept(server_fd, (struct sockaddr *)&address,
+                                 (socklen_t *)&addrlen)) < 0)
+            {
+                printf("Failure!\n");
+                perror("accept");
+                exit(EXIT_FAILURE);
+            }
+            printf("Server LOG %d: Connection accepted!\n", parentPID);
+
+            wyslij(sendFDSock, client);
+            close(client);
+            
             /**
              * Send SIGINT to the child who is about to handle the next incoming request
              */
@@ -203,12 +305,6 @@ int main(int argc, char const *argv[])
                 if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
                     break;
             }
-
-            /**
-             * Receives SIGUSR1, saying that child has received a connection request
-             * Proceeds with assigning next request to a new PID on receiving SIGUSR1
-             */
-            pause();
 
             requestsHandled += 1;
             if (requestsHandled % 25 == 0)
@@ -235,9 +331,14 @@ int main(int argc, char const *argv[])
 void sigint(int snum)
 {
     signal(SIGINT, sigint);
+
+    int indexOfPID = unavailableIndices.front();
+    int recvFDSock = parentChildSock[indexOfPID].second;
+
+    int client = odbierz(recvFDSock);
+
     int childPID = getpid();
 
-    int client;
     string data = "Response from server: Sent from PID ";
     data.append(to_string(childPID));
     char toSend[data.length() + 1];
@@ -245,24 +346,6 @@ void sigint(int snum)
 
     int valread;
     char buffer[1024] = {0};
-
-    /**
-     * Accepts incoming connection
-     */
-    if ((client = accept(server_fd, (struct sockaddr *)&address,
-                         (socklen_t *)&addrlen)) < 0)
-    {
-        printf("Failure!\n");
-        perror("accept");
-        exit(EXIT_FAILURE);
-    }
-    printf("Server LOG %d: Connection accepted!\n", childPID);
-
-    /** 
-     * Signals the parent that a connection request has been received, 
-     * so that a new child can be assigned for the next incoming request
-     */
-    kill(parentPID, SIGUSR1);
 
     valread = read(client, buffer, 1024);
     printf("Server LOG %d: Data read from client.\n", childPID);
