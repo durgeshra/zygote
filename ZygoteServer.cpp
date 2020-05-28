@@ -75,6 +75,8 @@ void sigint(int snum);
  */
 static void sendFD(int socket, int fd)
 {
+    cout << "LOG (sendFD " << getpid() << "): Sending FD " << fd << " from parent to child via FD " << socket << endl;
+
     struct msghdr msg = {0};
     char m_buffer[256];
     char buf[CMSG_SPACE(sizeof(fd))];
@@ -96,7 +98,7 @@ static void sendFD(int socket, int fd)
     msg.msg_controllen = CMSG_SPACE(sizeof(fd));
 
     if (sendmsg(socket, &msg, 0) < 0)
-        printf("Failed to send message\n");
+        cout << "LOG (sendFD): Failed to send message" << endl;
 }
 
 /**
@@ -104,6 +106,8 @@ static void sendFD(int socket, int fd)
  */
 static int receiveFD(int socket)
 {
+    cout << "LOG (receiveFD " << getpid() << "): Receiving client FD from parent via FD " << socket << endl;
+
     struct msghdr msg = {0};
 
     char m_buffer[256];
@@ -116,15 +120,15 @@ static int receiveFD(int socket)
     msg.msg_controllen = sizeof(c_buffer);
 
     if (recvmsg(socket, &msg, 0) < 0)
-        printf("Failed to receive message\n");
+        cout << "LOG (receiveFD): Failed to receive message" << endl;
 
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
 
     unsigned char *data = CMSG_DATA(cmsg);
 
-    printf("About to extract fd\n");
+    cout << "LOG (receiveFD): About to extract FD" << endl;
     int fd = *((int *)data);
-    printf("Extracted fd %d\n", fd);
+    cout << "LOG (receiveFD): Extracted FD " << fd << endl;
 
     return fd;
 }
@@ -134,6 +138,7 @@ static int receiveFD(int socket)
  */
 void refillUsaps(vector<int> &numUsaps, int group, int usapPoolSizeMax, vector<vector<int>> &zygoteSocketPIDs, vector<queue<int>> &availableIndices, vector<queue<int>> &unavailableIndices)
 {
+    cout << "LOG (refillUsaps): Refilling USAP Pool for group " << group << endl;
     childGroup = group; // Used by the child to know its own group
     while (numUsaps[group] < usapPoolSizeMax)
     {
@@ -228,12 +233,12 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
+    cout << "LOG (main): Listening for connections..." << endl;
+
     /**
      * PID of the last forked process
      */
     int lastForkPID = -1;
-
-    printf("Server LOG %d: Forking...\n", parentPID);
 
     /**
      * Fill parentChildSock completely before forking child processes
@@ -245,7 +250,7 @@ int main(int argc, char const *argv[])
             int sv[2];
             if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0)
             {
-                printf("Error creating unix-domain socket pair\n.");
+                cout << "Error creating unix-domain socket pair" << endl;
             }
             pair<int, int> newSock(sv[0], sv[1]);
             parentChildSock[g].push_back(newSock);
@@ -264,6 +269,8 @@ int main(int argc, char const *argv[])
             unavailableIndices[g].push(i);
         }
     }
+
+    cout << "LOG (main " << parentPID << "): Filling USAP pools for the first time" << endl;
 
     /**
      * Forks new processes until maximum pool size is reached
@@ -304,6 +311,8 @@ int main(int argc, char const *argv[])
      */
     if (getpid() == parentPID)
     {
+        cout << "LOG (main " << parentPID << "): Inside parent" << endl;
+
         while (true)
         {
             /**
@@ -321,6 +330,8 @@ int main(int argc, char const *argv[])
              */
             int group = -1;
 
+            cout << "LOG (main " << parentPID << "): Looking for a new connection..." << endl;
+
             /**
              * Accepts incoming connection until a valid request is received
              */
@@ -329,11 +340,10 @@ int main(int argc, char const *argv[])
                 if ((client = accept(server_fd, (struct sockaddr *)&address,
                                      (socklen_t *)&addrlen)) < 0)
                 {
-                    printf("Failure!\n");
-                    perror("accept");
+                    cout << "LOG (main): Failure!" << endl;
                     exit(EXIT_FAILURE);
                 }
-                printf("Server LOG %d: Connection accepted!\n", parentPID);
+                cout << "LOG (main " << parentPID << "): Connection accepted!" << endl;
 
                 /**
                  * Process group ID as requested by the client
@@ -345,7 +355,7 @@ int main(int argc, char const *argv[])
 
                 if (valread < 0)
                 {
-                    char toSend[] = "Error in reveiving group number from client.\n";
+                    char toSend[] = "Error in reveiving group number from client.";
                     send(client, toSend, strlen(toSend), 0);
                     close(client);
                 }
@@ -353,7 +363,7 @@ int main(int argc, char const *argv[])
                 string groupAssigned(requestGroup);
                 if (groupAssigned.substr(0, 5) != "Group")
                 {
-                    char toSend[] = "Invalid group format from the client side.\n";
+                    char toSend[] = "Invalid group format from the client side.";
                     send(client, toSend, strlen(toSend), 0);
                     close(client);
                 }
@@ -362,7 +372,7 @@ int main(int argc, char const *argv[])
                     group = stoi(groupAssigned.substr(5, groupAssigned.length()));
                     if (group < 0 || group >= numGroups)
                     {
-                        char toSend[] = "Invalid group number from the client side.\n";
+                        char toSend[] = "Invalid group number from the client side.";
                         send(client, toSend, strlen(toSend), 0);
                         close(client);
                     }
@@ -372,6 +382,8 @@ int main(int argc, char const *argv[])
                     }
                 }
             }
+
+            cout << "LOG (main " << parentPID << "): Process group of new request: " << group << endl;
 
             /**
              * Ensure that the number of active processes is not more than the maximum pool size
@@ -397,10 +409,12 @@ int main(int argc, char const *argv[])
             unavailableIndices[group].push(indexAcquired);
             numUsaps[group] -= 1;
 
-            printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[group][indexAcquired], indexAcquired);
+            cout << "LOG (main " << parentPID << "): Assigning next request to PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
 
             sendFD(sendFDSock, client);
             close(client);
+
+            cout << "LOG (main " << parentPID << "): Sending SIGINT to child PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
 
             /**
              * Send SIGINT to the child who is about to handle the next incoming request
@@ -408,6 +422,14 @@ int main(int argc, char const *argv[])
             kill(zygoteSocketPIDs[group][indexAcquired], SIGINT);
 
             activeUsaps[group] += 1;
+
+            requestsHandled += 1;
+            if (requestsHandled % 25 == 0)
+            {
+                gettimeofday(&stopTime, NULL);
+                double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
+                cout << "LOG (main " << parentPID << "): " << requestsHandled << " requests handled in " << seconds << " seconds" << endl;
+            }
 
             /**
              * Refill the pool if numUsaps falls below the minimum pool size
@@ -418,14 +440,6 @@ int main(int argc, char const *argv[])
                 if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
                     break;
             }
-
-            requestsHandled += 1;
-            if (requestsHandled % 25 == 0)
-            {
-                gettimeofday(&stopTime, NULL);
-                double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
-                printf("Server LOG %d: %d requests handled in %f seconds\n", parentPID, requestsHandled, seconds);
-            }
         }
     }
 
@@ -434,7 +448,6 @@ int main(int argc, char const *argv[])
      */
     if (getpid() != parentPID)
     {
-        // std::cout << "Child process: " << getpid() << std::endl;
         pause();
     }
 
@@ -448,6 +461,10 @@ void sigint(int snum)
      */
     signal(SIGINT, sigint);
 
+    int childPID = getpid();
+
+    cout << "LOG (sigint " << childPID << "): SIGINT received from parent" << endl;
+
     /**
      * Index of PID in parentChildSock
      * unavailableIndices.front() in the parent just before forking
@@ -460,13 +477,12 @@ void sigint(int snum)
      * Used to receive the FD of the client from parent
      */
     int recvFDSock = parentChildSock[childGroup][indexOfPID].second;
-
     /**
      * FD of the client whose request this child is supposed to handle
      */
     int client = receiveFD(recvFDSock);
 
-    int childPID = getpid();
+    cout << "LOG (sigint " << childPID << "): Received client FD: " << client << endl;
 
     string data = "Response from server (PID=";
     data.append(to_string(childPID));
@@ -476,9 +492,9 @@ void sigint(int snum)
     char toSend[data.length() + 1];
     strcpy(toSend, data.c_str());
 
-    printf("Server LOG %d: Request processed from client.\n", childPID);
-
     send(client, toSend, strlen(toSend), 0);
+
+    cout << "LOG (sigint " << childPID << "): Request processed from client" << endl;
 
     close(client);
     exit(0);
@@ -490,6 +506,9 @@ void sigint(int snum)
 void childTerminated(int snum)
 {
     int pid = waitpid(-1, NULL, WNOHANG);
+
+    cout << "LOG (childTerminated): Process with PID " << pid << " exited" << endl;
+
     int terminatedChildGroup = childPIDGroup[pid];
     childPIDGroup.erase(pid);
     activeUsaps[terminatedChildGroup] -= 1;

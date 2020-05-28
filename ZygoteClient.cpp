@@ -24,14 +24,14 @@ int main(int argc, char const *argv[])
      */
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
     {
-        printf("\nInvalid address/ Address not supported \n");
+        printf("LOG: Invalid address / Address not supported\n");
         return -1;
     }
 
     /**
      * Number of process groups
      */
-    int numGroups = 4;
+    int numGroups = 3;
 
     /**
      * Number of reuests to be sent per unit time
@@ -46,13 +46,13 @@ int main(int argc, char const *argv[])
     {
         if ((zygoteClientSocket = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         {
-            printf("\n Socket creation error \n");
+            printf("LOG: Socket creation error\n");
             return -1;
         }
 
         if (connect(zygoteClientSocket, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
         {
-            printf("\nConnection Failed \n");
+            printf("LOG: Connection Failed");
             return -1;
         }
 
@@ -66,9 +66,9 @@ int main(int argc, char const *argv[])
         requestNum += 1;
 
         send(zygoteClientSocket, toSend, strlen(toSend), 0);
-        printf("Client LOG: Data sent from client.\n");
+        printf("LOG: Data sent from client to server\n");
         valread = read(zygoteClientSocket, buffer, 1024);
-        printf("Client LOG: %s\n", buffer);
+        printf("LOG: Data received from server\n%s\n", buffer);
 
         close(zygoteClientSocket);
         usleep(sleepInterval * 1e6);
