@@ -22,12 +22,19 @@ struct sockaddr_in address;
 int addrlen = sizeof(address);
 int server_fd;
 int parentPID;
-int childGroup = -1;
 
 /**
  * Number of process groups
  */
 int numGroups = 3;
+
+/**
+ * Process group a child belongs to,
+ * this variable is set just before forking,
+ * so that the child inherits the value and
+ * it can be accessed in the child
+ */
+int childGroup = -1;
 
 /**
  * Number of active USAPs
@@ -57,13 +64,16 @@ vector<string> groupNames{"Alpha", "Beta", "Gamma", "Delta", "Epsilon"};
 /**
  * Mapping of child PIDs with corresponding groups,
  * accessed when a child process is terminated
+ * to decrease the number of active USAPs of the corresponding group
  */
 unordered_map<int, int> childPIDGroup;
 
 void sigint(int snum);
-void sigusr1(int snum);
 
-static void wyslij(int socket, int fd) // send fd by socket
+/**
+ * Sends FD from parent to child
+ */
+static void sendFD(int socket, int fd)
 {
     struct msghdr msg = {0};
     char m_buffer[256];
@@ -89,7 +99,10 @@ static void wyslij(int socket, int fd) // send fd by socket
         printf("Failed to send message\n");
 }
 
-static int odbierz(int socket) // receive fd from socket
+/**
+ * Receives FD sent from the parent
+ */
+static int receiveFD(int socket)
 {
     struct msghdr msg = {0};
 
@@ -121,7 +134,7 @@ static int odbierz(int socket) // receive fd from socket
  */
 void refillUsaps(vector<int> &numUsaps, int group, int usapPoolSizeMax, vector<vector<int>> &zygoteSocketPIDs, vector<queue<int>> &availableIndices, vector<queue<int>> &unavailableIndices)
 {
-    childGroup = group; // Useful for the child to know its own group
+    childGroup = group; // Used by the child to know its own group
     while (numUsaps[group] < usapPoolSizeMax)
     {
         int pid = fork();
@@ -175,7 +188,6 @@ int main(int argc, char const *argv[])
     void childTerminated(int);
     signal(SIGCHLD, childTerminated); // Triggered on the termination of a child process
     signal(SIGINT, sigint);           // Parent gives a green signal to child
-    signal(SIGUSR1, sigusr1);         // Child sends message to parent that a connection request has been received
 
     /**
      *  Createssocket file descriptor
@@ -241,8 +253,9 @@ int main(int argc, char const *argv[])
     }
 
     /**
-     * Fill up unavailableIndices before forking. Useful to identify receiving end of socket in the child,
-     * and maintaining uniformity ith refillUsaps function
+     * Fill up unavailableIndices before forking.
+     * Used to identify receiving end of socket in the child,
+     * and maintaining uniformity with refillUsaps function
      */
     for (int g = 0; g < numGroups; g++)
     {
@@ -279,6 +292,10 @@ int main(int argc, char const *argv[])
 
     struct timeval startTime, stopTime;
     gettimeofday(&startTime, NULL);
+
+    /** 
+     * Number of requests handled successfully
+     */
     int requestsHandled = 0;
 
     /**
@@ -289,13 +306,23 @@ int main(int argc, char const *argv[])
     {
         while (true)
         {
-
+            /**
+             * FD of the client
+             */
             int client;
+
+            /**
+             * Set to 1 if a valid request is received from the client
+             */
             int validRequestReceived = 0;
+
+            /**
+             * Process group to which the incoming request is to be assigned
+             */
             int group = -1;
 
             /**
-             * Accepts incoming connection
+             * Accepts incoming connection until a valid request is received
              */
             while (!validRequestReceived)
             {
@@ -308,8 +335,12 @@ int main(int argc, char const *argv[])
                 }
                 printf("Server LOG %d: Connection accepted!\n", parentPID);
 
+                /**
+                 * Process group ID as requested by the client
+                 * Format: Group<Number>
+                 * Example: Group0, Group1, etc.
+                 */
                 char requestGroup[64] = {0};
-
                 int valread = read(client, requestGroup, 64);
 
                 if (valread < 0)
@@ -329,7 +360,7 @@ int main(int argc, char const *argv[])
                 else
                 {
                     group = stoi(groupAssigned.substr(5, groupAssigned.length()));
-                    if (group >= numGroups)
+                    if (group < 0 || group >= numGroups)
                     {
                         char toSend[] = "Invalid group number from the client side.\n";
                         send(client, toSend, strlen(toSend), 0);
@@ -355,14 +386,20 @@ int main(int argc, char const *argv[])
              * Decides which child to assign the next request to
              */
             int indexAcquired = availableIndices[group].front();
+
+            /**
+             * FD of the sending end of socket connection `between parent and child'
+             * Used to send the FD of the client to child
+             */
             int sendFDSock = parentChildSock[group][indexAcquired].first;
+
             availableIndices[group].pop();
             unavailableIndices[group].push(indexAcquired);
             numUsaps[group] -= 1;
 
             printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[group][indexAcquired], indexAcquired);
 
-            wyslij(sendFDSock, client);
+            sendFD(sendFDSock, client);
             close(client);
 
             /**
@@ -406,12 +443,28 @@ int main(int argc, char const *argv[])
 
 void sigint(int snum)
 {
+    /**
+     * Signal received by the parent to start working
+     */
     signal(SIGINT, sigint);
 
+    /**
+     * Index of PID in parentChildSock
+     * unavailableIndices.front() in the parent just before forking
+     * contains the index of this child
+     */
     int indexOfPID = unavailableIndices[childGroup].front();
+
+    /**
+     * FD of the receiving end of socket connection `between parent and child'
+     * Used to receive the FD of the client from parent
+     */
     int recvFDSock = parentChildSock[childGroup][indexOfPID].second;
 
-    int client = odbierz(recvFDSock);
+    /**
+     * FD of the client whose request this child is supposed to handle
+     */
+    int client = receiveFD(recvFDSock);
 
     int childPID = getpid();
 
@@ -429,11 +482,6 @@ void sigint(int snum)
 
     close(client);
     exit(0);
-}
-
-void sigusr1(int snum)
-{
-    return;
 }
 
 /**
