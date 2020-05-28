@@ -22,13 +22,14 @@ int addrlen = sizeof(address);
 int server_fd;
 int parentPID;
 int activeUsaps = 0;
+int childGroup = -1;
 
 /**
  * Parent-Child sockets for sending client information to child
  */
 vector<pair<int, int>> parentChildSock;
 
-/** 
+/**
  * Indices of available USAPs in the vector zygoteSocketPIDs
  */
 queue<int> availableIndices;
@@ -37,6 +38,11 @@ queue<int> availableIndices;
  * Indices of unavailable USAPs in the vector zygoteSocketPIDs
  */
 queue<int> unavailableIndices;
+
+/**
+ * Group Names
+ */
+vector<string> groupNames{"Alpha", "Beta", "Gamma", "Delta", "Epsilon"};
 
 void sigint(int snum);
 void sigusr1(int snum);
@@ -129,6 +135,11 @@ int main(int argc, char const *argv[])
      * Minimum Pool Size before it is refilled
      */
     int usapPoolSizeMin = 5;
+
+    /**
+     * Number of process groups
+     */
+    int numGroups = 3;
 
     /**
      * PIDs of the forked processes
@@ -273,22 +284,58 @@ int main(int argc, char const *argv[])
             printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[indexAcquired], indexAcquired);
 
             int client;
+            int validRequestReceived = 0;
+            int group = -1;
 
             /**
              * Accepts incoming connection
              */
-            if ((client = accept(server_fd, (struct sockaddr *)&address,
-                                 (socklen_t *)&addrlen)) < 0)
+            while (!validRequestReceived)
             {
-                printf("Failure!\n");
-                perror("accept");
-                exit(EXIT_FAILURE);
+                if ((client = accept(server_fd, (struct sockaddr *)&address,
+                                     (socklen_t *)&addrlen)) < 0)
+                {
+                    printf("Failure!\n");
+                    perror("accept");
+                    exit(EXIT_FAILURE);
+                }
+                printf("Server LOG %d: Connection accepted!\n", parentPID);
+
+                char requestGroup[64] = {0};
+
+                int valread = read(client, requestGroup, 64);
+
+                if (valread < 0)
+                {
+                    char toSend[] = "Error in reveiving group number from client.\n";
+                    send(client, toSend, strlen(toSend), 0);
+                    close(client);
+                }
+
+                string groupAssigned(requestGroup);
+                if (groupAssigned.substr(0, 5) != "Group")
+                {
+                    char toSend[] = "Invalid group format from the client side.\n";
+                    send(client, toSend, strlen(toSend), 0);
+                    close(client);
+                }
+                else
+                {
+                    group = stoi(groupAssigned.substr(5, groupAssigned.length()));
+                    if (group>numGroups){
+                        char toSend[] = "Invalid group number from the client side.\n";
+                        send(client, toSend, strlen(toSend), 0);
+                        close(client);
+                    }
+                    else{
+                        validRequestReceived = 1;
+                    }
+                }
             }
-            printf("Server LOG %d: Connection accepted!\n", parentPID);
 
             wyslij(sendFDSock, client);
             close(client);
-            
+
             /**
              * Send SIGINT to the child who is about to handle the next incoming request
              */
@@ -339,17 +386,15 @@ void sigint(int snum)
 
     int childPID = getpid();
 
-    string data = "Response from server: Sent from PID ";
+    string data = "Response from server (PID=";
     data.append(to_string(childPID));
+    data.append("): Group Assigned is ");
+    data.append(groupNames[childGroup]);
+
     char toSend[data.length() + 1];
     strcpy(toSend, data.c_str());
 
-    int valread;
-    char buffer[1024] = {0};
-
-    valread = read(client, buffer, 1024);
-    printf("Server LOG %d: Data read from client.\n", childPID);
-    printf("Server LOG %d: %s\n", childPID, buffer);
+    printf("Server LOG %d: Request processed from client.\n", childPID);
 
     send(client, toSend, strlen(toSend), 0);
 

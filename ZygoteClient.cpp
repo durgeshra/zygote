@@ -16,8 +16,8 @@ int main(int argc, char const *argv[])
 
     struct sockaddr_in serv_addr;
 
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(PORT);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
 
     /**
      * Converts IPv4 and IPv6 addresses from text to binary form\
@@ -27,6 +27,11 @@ int main(int argc, char const *argv[])
         printf("\nInvalid address/ Address not supported \n");
         return -1;
     }
+
+    /**
+     * Number of process groups
+     */
+    int numGroups = 3;
 
     /**
      * Number of reuests to be sent per unit time
@@ -50,9 +55,9 @@ int main(int argc, char const *argv[])
             printf("\nConnection Failed \n");
             return -1;
         }
-        
-        string data = "Command from client: ";
-        data.append(to_string(requestNum));
+
+        string data = "Group";
+        data.append(to_string(requestNum % numGroups));
 
         char toSend[data.length() + 1];
         strcpy(toSend, data.c_str());
