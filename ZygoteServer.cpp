@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <unordered_map>
 
 #define PORT 8080
 
@@ -21,28 +22,43 @@ struct sockaddr_in address;
 int addrlen = sizeof(address);
 int server_fd;
 int parentPID;
-int activeUsaps = 0;
 int childGroup = -1;
+
+/**
+ * Number of process groups
+ */
+int numGroups = 3;
+
+/**
+ * Number of active USAPs
+ */
+vector<int> activeUsaps(numGroups, 0);
 
 /**
  * Parent-Child sockets for sending client information to child
  */
-vector<pair<int, int>> parentChildSock;
+vector<vector<pair<int, int>>> parentChildSock(numGroups);
 
 /**
  * Indices of available USAPs in the vector zygoteSocketPIDs
  */
-queue<int> availableIndices;
+vector<queue<int>> availableIndices(numGroups);
 
 /** 
  * Indices of unavailable USAPs in the vector zygoteSocketPIDs
  */
-queue<int> unavailableIndices;
+vector<queue<int>> unavailableIndices(numGroups);
 
 /**
  * Group Names
  */
 vector<string> groupNames{"Alpha", "Beta", "Gamma", "Delta", "Epsilon"};
+
+/**
+ * Mapping of child PIDs with corresponding groups,
+ * accessed when a child process is terminated
+ */
+unordered_map<int, int> childPIDGroup;
 
 void sigint(int snum);
 void sigusr1(int snum);
@@ -103,20 +119,22 @@ static int odbierz(int socket) // receive fd from socket
 /**
  * Refills th USAP pool when the number of available forks falls below the minimum pool size
  */
-void refillUsaps(int &numUsaps, int usapPoolSizeMax, vector<int> &zygoteSocketPIDs, queue<int> &availableIndices, queue<int> &unavailableIndices)
+void refillUsaps(vector<int> &numUsaps, int group, int usapPoolSizeMax, vector<vector<int>> &zygoteSocketPIDs, vector<queue<int>> &availableIndices, vector<queue<int>> &unavailableIndices)
 {
-    while (numUsaps < usapPoolSizeMax)
+    childGroup = group; // Useful for the child to know its own group
+    while (numUsaps[group] < usapPoolSizeMax)
     {
         int pid = fork();
         if (pid == 0)
             return;
         else
         {
-            int unavailableIndex = unavailableIndices.front();
-            unavailableIndices.pop();
-            zygoteSocketPIDs[unavailableIndex] = pid;
-            numUsaps += 1;
-            availableIndices.push(unavailableIndex);
+            int unavailableIndex = unavailableIndices[group].front();
+            unavailableIndices[group].pop();
+            zygoteSocketPIDs[group][unavailableIndex] = pid;
+            numUsaps[group] += 1;
+            availableIndices[group].push(unavailableIndex);
+            childPIDGroup[pid] = group;
         }
     }
     return;
@@ -137,19 +155,14 @@ int main(int argc, char const *argv[])
     int usapPoolSizeMin = 5;
 
     /**
-     * Number of process groups
-     */
-    int numGroups = 3;
-
-    /**
      * PIDs of the forked processes
      */
-    vector<int> zygoteSocketPIDs(usapPoolSizeMax, -1);
+    vector<vector<int>> zygoteSocketPIDs(numGroups, vector<int>(usapPoolSizeMax, -1));
 
     /**
      * Number of USAPs currently in existence
      */
-    int numUsaps = 0;
+    vector<int> numUsaps(numGroups, 0);
 
     /**
      * PID of the parent process
@@ -213,42 +226,55 @@ int main(int argc, char const *argv[])
     /**
      * Fill parentChildSock completely before forking child processes
      */
-    for (int i = 0; i < usapPoolSizeMax; i++)
+    for (int g = 0; g < numGroups; g++)
     {
-        int sv[2];
-        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0)
+        for (int i = 0; i < usapPoolSizeMax; i++)
         {
-            printf("Error creating unix-domain socket pair\n.");
+            int sv[2];
+            if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0)
+            {
+                printf("Error creating unix-domain socket pair\n.");
+            }
+            pair<int, int> newSock(sv[0], sv[1]);
+            parentChildSock[g].push_back(newSock);
         }
-        pair<int, int> newSock(sv[0], sv[1]);
-        parentChildSock.push_back(newSock);
     }
 
     /**
      * Fill up unavailableIndices before forking. Useful to identify receiving end of socket in the child,
      * and maintaining uniformity ith refillUsaps function
      */
-    for (int i = 0; i < usapPoolSizeMax; i++)
+    for (int g = 0; g < numGroups; g++)
     {
-        unavailableIndices.push(i);
+        for (int i = 0; i < usapPoolSizeMax; i++)
+        {
+            unavailableIndices[g].push(i);
+        }
     }
 
     /**
      * Forks new processes until maximum pool size is reached
      */
-    while (numUsaps < usapPoolSizeMax)
+    for (int g = 0; g < numGroups; g++)
     {
-        lastForkPID = fork();
+        childGroup = g; // Useful for the child to know its own group
+        while (numUsaps[g] < usapPoolSizeMax)
+        {
+            lastForkPID = fork();
+            if (lastForkPID == 0)
+                break; // Child
+            else
+            {
+                int unavailableIndex = unavailableIndices[g].front();
+                unavailableIndices[g].pop();
+                zygoteSocketPIDs[g][unavailableIndex] = lastForkPID;
+                availableIndices[g].push(numUsaps[g]);
+                numUsaps[g] += 1;
+                childPIDGroup[lastForkPID] = g;
+            }
+        }
         if (lastForkPID == 0)
             break; // Child
-        else
-        {
-            int unavailableIndex = unavailableIndices.front();
-            unavailableIndices.pop();
-            zygoteSocketPIDs[unavailableIndex] = lastForkPID;
-            availableIndices.push(numUsaps);
-            numUsaps += 1;
-        }
     }
 
     struct timeval startTime, stopTime;
@@ -263,25 +289,6 @@ int main(int argc, char const *argv[])
     {
         while (true)
         {
-            /**
-             * Ensure that the number of active processes is not more than the maximum pool size
-             */
-            while (activeUsaps >= usapPoolSizeMax)
-            {
-                usleep(1e4);
-                continue;
-            }
-
-            /**
-             * Decides which child to assign the next request to
-             */
-            int indexAcquired = availableIndices.front();
-            int sendFDSock = parentChildSock[indexAcquired].first;
-            availableIndices.pop();
-            unavailableIndices.push(indexAcquired);
-            numUsaps -= 1;
-
-            printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[indexAcquired], indexAcquired);
 
             int client;
             int validRequestReceived = 0;
@@ -322,16 +329,38 @@ int main(int argc, char const *argv[])
                 else
                 {
                     group = stoi(groupAssigned.substr(5, groupAssigned.length()));
-                    if (group>numGroups){
+                    if (group >= numGroups)
+                    {
                         char toSend[] = "Invalid group number from the client side.\n";
                         send(client, toSend, strlen(toSend), 0);
                         close(client);
                     }
-                    else{
+                    else
+                    {
                         validRequestReceived = 1;
                     }
                 }
             }
+
+            /**
+             * Ensure that the number of active processes is not more than the maximum pool size
+             */
+            while (activeUsaps[group] >= usapPoolSizeMax)
+            {
+                usleep(1e4);
+                continue;
+            }
+
+            /**
+             * Decides which child to assign the next request to
+             */
+            int indexAcquired = availableIndices[group].front();
+            int sendFDSock = parentChildSock[group][indexAcquired].first;
+            availableIndices[group].pop();
+            unavailableIndices[group].push(indexAcquired);
+            numUsaps[group] -= 1;
+
+            printf("Server LOG %d: Assigning next request to PID: %d %d\n", parentPID, zygoteSocketPIDs[group][indexAcquired], indexAcquired);
 
             wyslij(sendFDSock, client);
             close(client);
@@ -339,16 +368,16 @@ int main(int argc, char const *argv[])
             /**
              * Send SIGINT to the child who is about to handle the next incoming request
              */
-            kill(zygoteSocketPIDs[indexAcquired], SIGINT);
+            kill(zygoteSocketPIDs[group][indexAcquired], SIGINT);
 
-            activeUsaps += 1;
+            activeUsaps[group] += 1;
 
             /**
              * Refill the pool if numUsaps falls below the minimum pool size
              */
-            if (numUsaps <= usapPoolSizeMin)
+            if (numUsaps[group] <= usapPoolSizeMin)
             {
-                refillUsaps(numUsaps, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
+                refillUsaps(numUsaps, group, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
                 if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
                     break;
             }
@@ -379,8 +408,8 @@ void sigint(int snum)
 {
     signal(SIGINT, sigint);
 
-    int indexOfPID = unavailableIndices.front();
-    int recvFDSock = parentChildSock[indexOfPID].second;
+    int indexOfPID = unavailableIndices[childGroup].front();
+    int recvFDSock = parentChildSock[childGroup][indexOfPID].second;
 
     int client = odbierz(recvFDSock);
 
@@ -412,5 +441,8 @@ void sigusr1(int snum)
  */
 void childTerminated(int snum)
 {
-    activeUsaps -= 1;
+    int pid = waitpid(-1, NULL, WNOHANG);
+    int terminatedChildGroup = childPIDGroup[pid];
+    childPIDGroup.erase(pid);
+    activeUsaps[terminatedChildGroup] -= 1;
 }

@@ -31,7 +31,7 @@ int main(int argc, char const *argv[])
     /**
      * Number of process groups
      */
-    int numGroups = 3;
+    int numGroups = 4;
 
     /**
      * Number of reuests to be sent per unit time
