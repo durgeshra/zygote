@@ -44,17 +44,17 @@ vector<int> activeUsaps(numGroups, 0);
 /**
  * Maximum Pool Size
  */
-int usapPoolSizeMax = 2;
+int usapPoolSizeMax = 10;
 
 /**
  * Minimum Pool Size before it is refilled
  */
-int usapPoolSizeMin = 1;
+int usapPoolSizeMin = 5;
 
 /**
  * Maximum number of active processes
  */
-int activeProcessesMax = 3;
+int activeProcessesMax = 15;
 
 /**
  * PIDs of the forked processes
@@ -178,6 +178,7 @@ static int receiveFD(int socket)
  * Called whenever forking leads to creation of a child
  */
 void handleChild(){
+    cout << "LOG (handleChild " << getpid() << " ): Waiting..." << endl;
     pause();
 }
 

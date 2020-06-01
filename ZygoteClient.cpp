@@ -20,6 +20,15 @@ int main(int argc, char const *argv[])
     serv_addr.sin_port = htons(PORT);
 
     /**
+     * Converts IPv4 and IPv6 addresses from text to binary form\
+     */
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
+    {
+        printf("LOG: Invalid address / Address not supported\n");
+        return -1;
+    }
+
+    /**
      * Number of process groups
      */
     int numGroups = 3;
@@ -31,7 +40,7 @@ int main(int argc, char const *argv[])
     float sleepInterval = 1.0 / reqPerSec;
     time_t startTime = time(NULL);
 
-    int reqLeft = 15;
+    int reqLeft = 75;
 
     while (reqLeft--)
     {
@@ -39,15 +48,6 @@ int main(int argc, char const *argv[])
 
         if (pid == 0)
         {
-            /**
-             * Converts IPv4 and IPv6 addresses from text to binary form\
-             */
-            if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
-            {
-                printf("LOG: Invalid address / Address not supported\n");
-                return -1;
-            }
-
             if ((zygoteClientSocket = socket(AF_INET, SOCK_STREAM, 0)) < 0)
             {
                 printf("LOG: Socket creation error\n");
