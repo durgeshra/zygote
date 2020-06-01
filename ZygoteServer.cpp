@@ -42,6 +42,36 @@ int childGroup = -1;
 vector<int> activeUsaps(numGroups, 0);
 
 /**
+ * Maximum Pool Size
+ */
+int usapPoolSizeMax = 10;
+
+/**
+ * Minimum Pool Size before it is refilled
+ */
+int usapPoolSizeMin = 5;
+
+/**
+ * Maximum number of active processes
+ */
+int activeProcessesMax = 15;
+
+/**
+ * PIDs of the forked processes
+ */
+vector<vector<int>> zygoteSocketPIDs(numGroups, vector<int>(usapPoolSizeMax, -1));
+
+/**
+ * Number of USAPs currently in existence
+ */
+vector<int> numUsaps(numGroups, 0);
+
+/**
+ * Client FDs of pending requests
+ */
+vector<queue<int>> pendingClientFD(numGroups);
+
+/**
  * Parent-Child sockets for sending client information to child
  */
 vector<vector<pair<int, int>>> parentChildSock(numGroups);
@@ -61,12 +91,22 @@ vector<queue<int>> unavailableIndices(numGroups);
  */
 vector<string> groupNames{"Alpha", "Beta", "Gamma", "Delta", "Epsilon"};
 
+/** 
+ * Number of requests handled successfully
+ */
+int requestsHandled = 0;
+
 /**
  * Mapping of child PIDs with corresponding groups,
  * accessed when a child process is terminated
  * to decrease the number of active USAPs of the corresponding group
  */
 unordered_map<int, int> childPIDGroup;
+
+/**
+ * To track time taken in request handling
+ */
+struct timeval startTime;
 
 void sigint(int snum);
 
@@ -136,7 +176,7 @@ static int receiveFD(int socket)
 /**
  * Refills th USAP pool when the number of available forks falls below the minimum pool size
  */
-void refillUsaps(vector<int> &numUsaps, int group, int usapPoolSizeMax, vector<vector<int>> &zygoteSocketPIDs, vector<queue<int>> &availableIndices, vector<queue<int>> &unavailableIndices)
+void refillUsaps(int group)
 {
     cout << "LOG (refillUsaps): Refilling USAP Pool for group " << group << endl;
     childGroup = group; // Used by the child to know its own group
@@ -158,29 +198,63 @@ void refillUsaps(vector<int> &numUsaps, int group, int usapPoolSizeMax, vector<v
     return;
 }
 
+/**
+ * Schedules a pending client request now that number of active processes is not maxed out
+ */
+void scheduleRequest(int group, int client)
+{
+    /**
+     * Decides which child to assign the next request to
+     */
+    int indexAcquired = availableIndices[group].front();
+
+    /**
+     * FD of the sending end of socket connection `between parent and child'
+     * Used to send the FD of the client to child
+     */
+    int sendFDSock = parentChildSock[group][indexAcquired].first;
+
+    availableIndices[group].pop();
+    unavailableIndices[group].push(indexAcquired);
+    numUsaps[group] -= 1;
+
+    cout << "LOG (main " << parentPID << "): Assigning next request to PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
+
+    sendFD(sendFDSock, client);
+    close(client);
+
+    cout << "LOG (main " << parentPID << "): Sending SIGINT to child PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
+
+    /**
+     * Send SIGINT to the child who is about to handle the next incoming request
+     */
+    kill(zygoteSocketPIDs[group][indexAcquired], SIGINT);
+
+    activeUsaps[group] += 1;
+
+    requestsHandled += 1;
+    if (requestsHandled % 25 == 0)
+    {
+        struct timeval stopTime;
+        gettimeofday(&stopTime, NULL);
+        double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
+        cout << "LOG (main " << parentPID << "): " << requestsHandled << " requests handled in " << seconds << " seconds" << endl;
+    }
+
+    /**
+     * Refill the pool if numUsaps falls below the minimum pool size
+     */
+    if (numUsaps[group] <= usapPoolSizeMin)
+    {
+        refillUsaps(group);
+    }
+
+    return;
+}
+
 int main(int argc, char const *argv[])
 {
     int opt = 1;
-
-    /**
-     * Maximum Pool Size
-     */
-    int usapPoolSizeMax = 10;
-
-    /**
-     * Minimum Pool Size before it is refilled
-     */
-    int usapPoolSizeMin = 5;
-
-    /**
-     * PIDs of the forked processes
-     */
-    vector<vector<int>> zygoteSocketPIDs(numGroups, vector<int>(usapPoolSizeMax, -1));
-
-    /**
-     * Number of USAPs currently in existence
-     */
-    vector<int> numUsaps(numGroups, 0);
 
     /**
      * PID of the parent process
@@ -297,14 +371,6 @@ int main(int argc, char const *argv[])
             break; // Child
     }
 
-    struct timeval startTime, stopTime;
-    gettimeofday(&startTime, NULL);
-
-    /** 
-     * Number of requests handled successfully
-     */
-    int requestsHandled = 0;
-
     /**
      * Parent process allocates incoming requests to the children and 
      * maintains the number of children between minimum and maximum pool size
@@ -312,6 +378,7 @@ int main(int argc, char const *argv[])
     if (getpid() == parentPID)
     {
         cout << "LOG (main " << parentPID << "): Inside parent" << endl;
+        gettimeofday(&startTime, NULL);
 
         while (true)
         {
@@ -388,58 +455,65 @@ int main(int argc, char const *argv[])
             /**
              * Ensure that the number of active processes is not more than the maximum pool size
              */
-            while (activeUsaps[group] >= usapPoolSizeMax)
+            if (activeUsaps[group] >= activeProcessesMax)
             {
-                usleep(1e4);
+                cout << "LOG (main " << parentPID << "): Active processes maxed out for group " << group << ", putting the request on hold..." << endl;
+                pendingClientFD[group].push(client);
                 continue;
             }
 
-            /**
-             * Decides which child to assign the next request to
-             */
-            int indexAcquired = availableIndices[group].front();
+            scheduleRequest(group, client);
 
-            /**
-             * FD of the sending end of socket connection `between parent and child'
-             * Used to send the FD of the client to child
-             */
-            int sendFDSock = parentChildSock[group][indexAcquired].first;
+            if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
+                break;
 
-            availableIndices[group].pop();
-            unavailableIndices[group].push(indexAcquired);
-            numUsaps[group] -= 1;
+            // /**
+            //  * Decides which child to assign the next request to
+            //  */
+            // int indexAcquired = availableIndices[group].front();
 
-            cout << "LOG (main " << parentPID << "): Assigning next request to PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
+            // /**
+            //  * FD of the sending end of socket connection `between parent and child'
+            //  * Used to send the FD of the client to child
+            //  */
+            // int sendFDSock = parentChildSock[group][indexAcquired].first;
 
-            sendFD(sendFDSock, client);
-            close(client);
+            // availableIndices[group].pop();
+            // unavailableIndices[group].push(indexAcquired);
+            // numUsaps[group] -= 1;
 
-            cout << "LOG (main " << parentPID << "): Sending SIGINT to child PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
+            // cout << "LOG (main " << parentPID << "): Assigning next request to PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
 
-            /**
-             * Send SIGINT to the child who is about to handle the next incoming request
-             */
-            kill(zygoteSocketPIDs[group][indexAcquired], SIGINT);
+            // sendFD(sendFDSock, client);
+            // close(client);
 
-            activeUsaps[group] += 1;
+            // cout << "LOG (main " << parentPID << "): Sending SIGINT to child PID: " << zygoteSocketPIDs[group][indexAcquired] << endl;
 
-            requestsHandled += 1;
-            if (requestsHandled % 25 == 0)
-            {
-                gettimeofday(&stopTime, NULL);
-                double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
-                cout << "LOG (main " << parentPID << "): " << requestsHandled << " requests handled in " << seconds << " seconds" << endl;
-            }
+            // /**
+            //  * Send SIGINT to the child who is about to handle the next incoming request
+            //  */
+            // kill(zygoteSocketPIDs[group][indexAcquired], SIGINT);
 
-            /**
-             * Refill the pool if numUsaps falls below the minimum pool size
-             */
-            if (numUsaps[group] <= usapPoolSizeMin)
-            {
-                refillUsaps(numUsaps, group, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
-                if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
-                    break;
-            }
+            // activeUsaps[group] += 1;
+
+            // requestsHandled += 1;
+            // if (requestsHandled % 25 == 0)
+            // {
+            //     struct timeval stopTime;
+            //     gettimeofday(&stopTime, NULL);
+            //     double seconds = (double)(stopTime.tv_usec - startTime.tv_usec) / 1000000 + (double)(stopTime.tv_sec - startTime.tv_sec);
+            //     cout << "LOG (main " << parentPID << "): " << requestsHandled << " requests handled in " << seconds << " seconds" << endl;
+            // }
+
+            // /**
+            //  * Refill the pool if numUsaps falls below the minimum pool size
+            //  */
+            // if (numUsaps[group] <= usapPoolSizeMin)
+            // {
+            //     refillUsaps(numUsaps, group, usapPoolSizeMax, zygoteSocketPIDs, availableIndices, unavailableIndices);
+            //     if (getpid() != parentPID) // Necessary to move child processes formed in the refillUsaps function out of this (parent) block
+            //         break;
+            // }
         }
     }
 
@@ -507,9 +581,26 @@ void childTerminated(int snum)
 {
     int pid = waitpid(-1, NULL, WNOHANG);
 
-    cout << "LOG (childTerminated): Process with PID " << pid << " exited" << endl;
+    cout << "LOG (childTerminated " << getpid() << "): Process with PID " << pid << " exited" << endl;
 
     int terminatedChildGroup = childPIDGroup[pid];
     childPIDGroup.erase(pid);
     activeUsaps[terminatedChildGroup] -= 1;
+
+    /**
+     * If the process that just exited made the number of active process
+     * less than activeProcessesMax, schedule a pending request if available
+     */
+    if (activeUsaps[terminatedChildGroup] == activeProcessesMax - 1)
+    {
+        if (!pendingClientFD[terminatedChildGroup].empty())
+        {
+            int client = pendingClientFD[terminatedChildGroup].front();
+            cout << "LOG (childTerminated " << getpid() << "): Scheduling request from queue for client with FD " << client << endl;
+            pendingClientFD[terminatedChildGroup].pop();
+            scheduleRequest(terminatedChildGroup, client);
+        }
+    }
+
+    return;
 }
