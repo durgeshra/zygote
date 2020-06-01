@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include <string>
+#include <iostream>
 
 #define PORT 8080
 
@@ -12,6 +13,7 @@ using namespace std;
 
 int main(int argc, char const *argv[])
 {
+
     int zygoteClientSocket = 0, valread;
 
     struct sockaddr_in serv_addr;
@@ -40,7 +42,7 @@ int main(int argc, char const *argv[])
     float sleepInterval = 1.0 / reqPerSec;
     time_t startTime = time(NULL);
 
-    int reqLeft = 75;
+    int reqLeft = 100;
 
     while (reqLeft--)
     {
@@ -60,8 +62,24 @@ int main(int argc, char const *argv[])
                 return -1;
             }
 
-            string data = "Group";
-            data.append(to_string(reqLeft % numGroups));
+            string data;
+
+            srand(getpid());
+            int requestType = rand() % 100;
+            if (requestType < 5)
+            { // Wrong input type with probability 5%
+                data = "invalid_string";
+            }
+            else if (requestType < 10)
+            { // Wrong group with probability 5%
+                data = "Group";
+                data.append(to_string(5));
+            }
+            else
+            { // Correct input with probability 90%
+                data = "Group";
+                data.append(to_string(reqLeft % numGroups));
+            }
 
             char toSend[data.length() + 1];
             strcpy(toSend, data.c_str());
@@ -71,7 +89,13 @@ int main(int argc, char const *argv[])
             send(zygoteClientSocket, toSend, strlen(toSend), 0);
             printf("LOG: Data sent from client to server\n");
             valread = read(zygoteClientSocket, buffer, 1024);
-            printf("LOG: Data received from server\n%s\n", buffer);
+            printf("LOG: Data received from server\nRESPONSE: %s\n", buffer);
+            if (requestType < 5)
+                cout << "DBG: The above response should say 'invalid group format'." << endl;
+            else if (requestType < 10)
+                cout << "DBG: The above response should say 'invalid group number'." << endl;
+            else
+                cout << "DBG: The above response should give a valid group name." << endl;
 
             close(zygoteClientSocket);
 

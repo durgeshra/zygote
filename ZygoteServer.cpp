@@ -177,8 +177,9 @@ static int receiveFD(int socket)
  * Waits for a SIGINT, tht's all this function does
  * Called whenever forking leads to creation of a child
  */
-void handleChild(){
-    cout << "LOG (handleChild " << getpid() << " ): Waiting..." << endl;
+void handleChild()
+{
+    cout << "LOG (handleChild " << getpid() << "): Waiting..." << endl;
     pause();
 }
 
@@ -417,7 +418,6 @@ int main(int argc, char const *argv[])
                     cout << "LOG (main): Failure!" << endl;
                     exit(EXIT_FAILURE);
                 }
-                
 
                 cout << "LOG (main " << getpid() << "): Connection accepted!" << endl;
 
@@ -431,7 +431,7 @@ int main(int argc, char const *argv[])
 
                 if (valread < 0)
                 {
-                    char toSend[] = "Error in reveiving group number from client.";
+                    char toSend[] = "Error in receiving group number from client.";
                     send(client, toSend, strlen(toSend), 0);
                     close(client);
                 }
@@ -460,8 +460,6 @@ int main(int argc, char const *argv[])
             }
 
             cout << "LOG (main " << getpid() << "): Process group of new request: " << group << endl;
-
-            cout << getpid() << " " << activeUsaps[0] << activeUsaps[1] << activeUsaps[2] << endl;
 
             /**
              * Ensure that the number of active processes is not more than the maximum pool size
@@ -518,7 +516,12 @@ void sigint(int snum)
     char toSend[data.length() + 1];
     strcpy(toSend, data.c_str());
 
-    usleep(5e6);
+    srand(getpid());
+    if (rand() % 100 < 75)
+    { // Hold up queue with probability 50%
+        cout << "LOG (sigint " << childPID << "): Process waiting for 10 seconds to hold up queue..." << endl;
+        usleep(1e7);
+    }
 
     send(client, toSend, strlen(toSend), 0);
 
@@ -541,15 +544,13 @@ void childTerminated(int snum)
     childPIDGroup.erase(pid);
     activeUsaps[terminatedChildGroup] -= 1;
 
-    cout << activeUsaps[0] << activeUsaps[1] << activeUsaps[2] << endl;
-
     /**
      * If the process that just exited made the number of active process
      * less than activeProcessesMax, schedule a pending request if available
      */
     if (activeUsaps[terminatedChildGroup] == activeProcessesMax - 1)
     {
-         if (!pendingClientFD[terminatedChildGroup].empty())
+        if (!pendingClientFD[terminatedChildGroup].empty())
         {
             int client = pendingClientFD[terminatedChildGroup].front();
             cout << "LOG (childTerminated " << getpid() << "): Scheduling request from queue for client with FD " << client << endl;
