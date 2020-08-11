@@ -1,32 +1,35 @@
-Samsung Electronics Internship 2020: Durgesh Agrawal
+# Samsung Electronics Internship 2020: Durgesh Agrawal
 
-Task 1 Description:
+## Milestone 1
 
-Implement the following:-
+### Zygote Server
+• Pre-forks 10 processes in the USAP pool and waits for a socket connection from Zygote Client.
+• On receiving a request, sets a process into action.
+• If the USAP pool now contains less than 5 inactive processes, refills the pool.
+### Zygote Client
+• Sends request to Zygote Server via socket connection n times per second.
+### Process
+• After being set into action by Zygote Server, it prints log and exits.
 
-- 1 zygote process 
-which is reqired to create 1 process to zygoteserver via socket connection 
-it sends request based on time interval such as 2 seconds 50 times. 
+## Milestone 2
 
-- 1 zygoteserver
-which is waiting for a socket connection from zygote.
-of course it has created around 10 pre-forked processes in the pool. 
- 
-if it receives a request from zygote, 
-it checks usap pool whether it's empty or not.
+### Zygote Server
+• Maintains 3 process groups that are completely independent of each other.
+• Receives a group id from client, and assigns the request to USAP pool of appropriate group based on the group id.
+• Refills each USAP pool independently if a pool contains less than 5 processes.
+### Zygote Client
+• Sends request with a particular group id to Zygote Server via socket connection n times per second.
+• Prints group name received.
+Process
+• After being set into action by Zygote Server, it sends group name to Zygote Client, prints log and exits.
 
-if it's empty, then pre-fork processes.
+## Milestone 3
 
-if it's not empty, 
-it send command via socket to 1 usap process 
+### Zygote Server
+• Limits the number of process of each group that can run at a time to 15.
+• If 15 requests of a group are running and another request of the same group is received, it is put on hold until a running process finishes.
 
-before leaving, refill the process pool if the number of pre-forked processes become under threshold such as 5.
-
-- the usap processes
-it's forked and wait socket cmd from zygoteserver,
-if it receives a command, it just prints one log and exits.
-
-How to use:
+## How to use:
 
 Run `./start.sh` in one terminal.
 
